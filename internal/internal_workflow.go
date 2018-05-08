@@ -96,13 +96,14 @@ type (
 	receiveCallback func(v interface{}, more bool) bool
 
 	channelImpl struct {
-		name            string              // human readable channel name
-		size            int                 // Channel buffer size. 0 for non buffered.
-		buffer          []interface{}       // buffered messages
-		blockedSends    []valueCallbackPair // puts waiting when buffer is full.
-		blockedReceives []receiveCallback   // receives waiting when no messages are available.
-		closed          bool                // true if channel is closed.
-		recValue        *interface{}        // Used only while receiving value, this is used as pre-fetch buffer value from the channel.
+		name            string                // human readable channel name
+		size            int                   // Channel buffer size. 0 for non buffered.
+		buffer          []interface{}         // buffered messages
+		blockedSends    []valueCallbackPair   // puts waiting when buffer is full.
+		blockedReceives []receiveCallback     // receives waiting when no messages are available.
+		closed          bool                  // true if channel is closed.
+		recValue        *interface{}          // Used only while receiving value, this is used as pre-fetch buffer value from the channel.
+		dataConverter   encoded.DataConverter // for decode data
 	}
 
 	// Single case statement of the Select
@@ -164,6 +165,7 @@ type (
 		signalChannels                      map[string]SignalChannel
 		queryHandlers                       map[string]func([]byte) ([]byte, error)
 		workflowIDReusePolicy               WorkflowIDReusePolicy
+		dataConverter                       encoded.DataConverter
 	}
 
 	// decodeFutureImpl
@@ -195,8 +197,9 @@ type (
 	}
 
 	queryHandler struct {
-		fn        interface{}
-		queryType string
+		fn            interface{}
+		queryType     string
+		dataConverter encoded.DataConverter
 	}
 )
 
@@ -355,6 +358,7 @@ func newWorkflowContext(env workflowEnvironment) Context {
 	rootCtx = WithExecutionStartToCloseTimeout(rootCtx, time.Duration(wInfo.ExecutionStartToCloseTimeoutSeconds)*time.Second)
 	rootCtx = WithWorkflowTaskStartToCloseTimeout(rootCtx, time.Duration(wInfo.TaskStartToCloseTimeoutSeconds)*time.Second)
 	rootCtx = WithTaskList(rootCtx, wInfo.TaskListName)
+	rootCtx = WithWorkflowDataConverter(rootCtx, env.GetDataConverter())
 	return rootCtx
 }
 
@@ -484,21 +488,21 @@ func getState(ctx Context) *coroutineState {
 func (c *channelImpl) ReceiveEncodedValue(ctx Context) (value encoded.Value, more bool) {
 	var blob []byte
 	more = c.Receive(ctx, &blob)
-	value = EncodedValue(blob)
+	value = newEncodedValue(blob, c.dataConverter)
 	return
 }
 
 func (c *channelImpl) ReceiveEncodedValueAsync() (value encoded.Value, ok bool) {
 	var blob []byte
 	ok = c.ReceiveAsync(&blob)
-	value = EncodedValue(blob)
+	value = newEncodedValue(blob, c.dataConverter)
 	return
 }
 
 func (c *channelImpl) ReceiveEncodedValueAsyncWithMoreFlag() (value encoded.Value, ok bool, more bool) {
 	var blob []byte
 	ok, more = c.ReceiveAsyncWithMoreFlag(&blob)
-	value = EncodedValue(blob)
+	value = newEncodedValue(blob, c.dataConverter)
 	return
 }
 
@@ -636,7 +640,7 @@ func (c *channelImpl) Close() {
 
 // Takes a value and assigns that 'to' value.
 func (c *channelImpl) assignValue(from interface{}, to interface{}) {
-	err := getHostEnvironment().decodeAndAssignValue(from, to)
+	err := decodeAndAssignValue(c.dataConverter, from, to)
 	if err != nil {
 		panic(err)
 	}
@@ -993,7 +997,7 @@ func newWorkflowDefinition(workflow workflow) workflowDefinition {
 	return &syncWorkflowDefinition{workflow: workflow}
 }
 
-func getValidatedWorkflowFunction(workflowFunc interface{}, args []interface{}) (*WorkflowType, []byte, error) {
+func getValidatedWorkflowFunction(workflowFunc interface{}, args []interface{}, dataConverter encoded.DataConverter) (*WorkflowType, []byte, error) {
 	fnName := ""
 	fType := reflect.TypeOf(workflowFunc)
 	switch getKind(fType) {
@@ -1015,7 +1019,10 @@ func getValidatedWorkflowFunction(workflowFunc interface{}, args []interface{}) 
 			workflowFunc)
 	}
 
-	input, err := getHostEnvironment().encodeArgs(args)
+	if dataConverter == nil {
+		dataConverter = newDefaultDataConverter()
+	}
+	input, err := encodeArgs(dataConverter, args)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1067,7 +1074,18 @@ func setWorkflowEnvOptionsIfNotExist(ctx Context) Context {
 		newOptions.signalChannels = make(map[string]SignalChannel)
 		newOptions.queryHandlers = make(map[string]func([]byte) ([]byte, error))
 	}
+	if newOptions.dataConverter == nil {
+		newOptions.dataConverter = newDefaultDataConverter()
+	}
 	return WithValue(ctx, workflowEnvOptionsContextKey, &newOptions)
+}
+
+func getDataConverterFromWorkflowContext(ctx Context) encoded.DataConverter {
+	options := getWorkflowEnvOptions(ctx)
+	if options == nil || options.dataConverter == nil {
+		return newDefaultDataConverter()
+	}
+	return options.dataConverter
 }
 
 // getSignalChannel finds the assosciated channel for the signal.
@@ -1110,7 +1128,7 @@ func (d *decodeFutureImpl) Get(ctx Context, value interface{}) error {
 		return errors.New("value parameter is not a pointer")
 	}
 
-	err := deSerializeFunctionResult(d.fn, d.futureImpl.value.([]byte), value)
+	err := deSerializeFunctionResult(d.fn, d.futureImpl.value.([]byte), value, getDataConverterFromWorkflowContext(ctx))
 	if err != nil {
 		return err
 	}
@@ -1142,7 +1160,7 @@ func newDecodeFuture(ctx Context, fn interface{}) (Future, Settable) {
 
 // setQueryHandler sets query handler for given queryType.
 func setQueryHandler(ctx Context, queryType string, handler interface{}) error {
-	qh := &queryHandler{fn: handler, queryType: queryType}
+	qh := &queryHandler{fn: handler, queryType: queryType, dataConverter: getDataConverterFromWorkflowContext(ctx)}
 	err := qh.validateHandlerFn()
 	if err != nil {
 		return err
@@ -1199,7 +1217,7 @@ func (h *queryHandler) execute(input []byte) (result []byte, err error) {
 	if fnType.NumIn() == 1 && isTypeByteSlice(fnType.In(0)) {
 		args = append(args, reflect.ValueOf(input))
 	} else {
-		decoded, err := getHostEnvironment().decodeArgs(fnType, input)
+		decoded, err := decodeArgs(h.dataConverter, fnType, input)
 		if err != nil {
 			return nil, fmt.Errorf("unable to decode the input for queryType: %v, with error: %v", h.queryType, err)
 		}
@@ -1213,7 +1231,7 @@ func (h *queryHandler) execute(input []byte) (result []byte, err error) {
 	// we already verified (in validateHandlerFn()) that the query handler returns 2 values
 	retValue := retValues[0]
 	if retValue.Kind() != reflect.Ptr || !retValue.IsNil() {
-		result, err = getHostEnvironment().encodeArg(retValue.Interface())
+		result, err = encodeArg(h.dataConverter, retValue.Interface())
 		if err != nil {
 			return nil, err
 		}

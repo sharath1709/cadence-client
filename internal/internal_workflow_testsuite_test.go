@@ -82,6 +82,27 @@ func (s *WorkflowTestSuiteUnitTest) Test_ActivityMockFunction() {
 	env.AssertExpectations(s.T())
 }
 
+func (s *WorkflowTestSuiteUnitTest) Test_ActivityMockFunction_WithDataConverter() {
+	mockActivity := func(ctx context.Context, msg string) (string, error) {
+		return "mock_" + msg, nil
+	}
+
+	s.SetDataConverter(newTestDataConverter())
+	env := s.NewTestWorkflowEnvironment()
+	env.OnActivity(testActivityHello, mock.Anything, mock.Anything).Return(mockActivity).Once()
+
+	env.ExecuteWorkflow(testWorkflowHello)
+
+	s.True(env.IsWorkflowCompleted())
+	s.NoError(env.GetWorkflowError())
+	var result string
+	env.GetWorkflowResult(&result)
+	s.Equal("mock_world", result)
+	env.AssertExpectations(s.T())
+	// set back to default to not affect other tests
+	s.SetDataConverter(newDefaultDataConverter())
+}
+
 func (s *WorkflowTestSuiteUnitTest) Test_ActivityMockValues() {
 	env := s.NewTestWorkflowEnvironment()
 	env.OnActivity(testActivityHello, mock.Anything, mock.Anything).Return("mock_value", nil).Once()

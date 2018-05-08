@@ -35,12 +35,19 @@ import (
 
 type (
 	// EncodedValues is a type alias used to encapsulate/extract encoded arguments from workflow/activity.
-	EncodedValues []byte
+	EncodedValues struct {
+		values        []byte
+		dataConverter encoded.DataConverter
+	}
+
+	// ErrorDetailsValues is a type alias used hold error details objects.
+	ErrorDetailsValues []interface{}
 
 	// WorkflowTestSuite is the test suite to run unit tests for workflow/activity.
 	WorkflowTestSuite struct {
-		logger *zap.Logger
-		scope  tally.Scope
+		logger        *zap.Logger
+		scope         tally.Scope
+		dataConverter encoded.DataConverter
 	}
 
 	// TestWorkflowEnvironment is the environment that you use to test workflow
@@ -64,17 +71,40 @@ type (
 	}
 )
 
+func newEncodedValues(values []byte, dc encoded.DataConverter) encoded.Values {
+	if dc == nil {
+		dc = newDefaultDataConverter()
+	}
+	return &EncodedValues{values, dc}
+}
+
 // Get extract data from encoded data to desired value type. valuePtr is pointer to the actual value type.
 func (b EncodedValues) Get(valuePtr ...interface{}) error {
-	if b == nil {
+	if !b.HasValues() {
 		return ErrNoData
 	}
-	return getHostEnvironment().decode(b, valuePtr)
+	return b.dataConverter.FromData(b.values, valuePtr...)
 }
 
 // HasValues return whether there are values encoded.
 func (b EncodedValues) HasValues() bool {
-	return b != nil
+	return b.values != nil
+}
+
+// Get extract data from encoded data to desired value type. valuePtr is pointer to the actual value type.
+func (b ErrorDetailsValues) Get(valuePtr ...interface{}) error {
+	if !b.HasValues() {
+		return ErrNoData
+	}
+	for i, item := range b {
+		reflect.ValueOf(valuePtr[i]).Elem().Set(reflect.ValueOf(item))
+	}
+	return nil
+}
+
+// HasValues return whether there are values.
+func (b ErrorDetailsValues) HasValues() bool {
+	return b != nil && len(b) != 0
 }
 
 // NewTestWorkflowEnvironment creates a new instance of TestWorkflowEnvironment. Use the returned TestWorkflowEnvironment
@@ -104,6 +134,16 @@ func (s *WorkflowTestSuite) GetLogger() *zap.Logger {
 // tally.NoopScope
 func (s *WorkflowTestSuite) SetMetricsScope(scope tally.Scope) {
 	s.scope = scope
+}
+
+// SetDataConverter sets the data converter for this WorkflowTestSuite. If you don't set, it will be defaultDataConverter
+func (s *WorkflowTestSuite) SetDataConverter(dc encoded.DataConverter) {
+	s.dataConverter = dc
+}
+
+// GetDataConverter get the data converter for this WorkflowTestSuite.
+func (s *WorkflowTestSuite) GetDataConverter() encoded.DataConverter {
+	return s.dataConverter
 }
 
 // ExecuteActivity executes an activity. The tested activity will be executed synchronously in the calling goroutinue.

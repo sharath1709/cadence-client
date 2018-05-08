@@ -187,12 +187,11 @@ func (s *workflowRunSuite) SetupTest() {
 	s.workflowServiceClient = workflowservicetest.NewMockClient(s.mockCtrl)
 
 	metricsScope := metrics.NewTaggedScope(nil)
-	s.workflowClient = &workflowClient{
-		workflowService: s.workflowServiceClient,
-		domain:          domain,
-		metricsScope:    metricsScope,
-		identity:        identity,
+	options := &ClientOptions{
+		MetricsScope: metricsScope,
+		Identity:     identity,
 	}
+	s.workflowClient = NewClient(s.workflowServiceClient, domain, options)
 }
 
 func (s *workflowRunSuite) TearDownTest() {
@@ -208,7 +207,7 @@ func (s *workflowRunSuite) TestExecuteWorkflow_NoDup_Success() {
 	filterType := shared.HistoryEventFilterTypeCloseEvent
 	eventType := shared.EventTypeWorkflowExecutionCompleted
 	workflowResult := time.Hour * 59
-	encodedResult, _ := getHostEnvironment().encodeArg(workflowResult)
+	encodedResult, _ := encodeArg(newDefaultDataConverter(), workflowResult)
 	getRequest := getGetWorkflowExecutionHistoryRequest(filterType)
 	getResponse := &shared.GetWorkflowExecutionHistoryResponse{
 		History: &shared.History{
@@ -252,7 +251,7 @@ func (s *workflowRunSuite) TestExecuteWorkflow_NoDup_Cancelled() {
 	filterType := shared.HistoryEventFilterTypeCloseEvent
 	eventType := shared.EventTypeWorkflowExecutionCanceled
 	details := "some details"
-	encodedDetails, _ := getHostEnvironment().encodeArg(details)
+	encodedDetails, _ := encodeArg(newDefaultDataConverter(), details)
 	getRequest := getGetWorkflowExecutionHistoryRequest(filterType)
 	getResponse := &shared.GetWorkflowExecutionHistoryResponse{
 		History: &shared.History{
@@ -299,7 +298,8 @@ func (s *workflowRunSuite) TestExecuteWorkflow_NoDup_Failed() {
 	eventType := shared.EventTypeWorkflowExecutionFailed
 	reason := "some reason"
 	details := "some details"
-	encodedDetails, _ := getHostEnvironment().encodeArg(details)
+	dataConverter := newDefaultDataConverter()
+	encodedDetails, _ := encodeArg(dataConverter, details)
 	getRequest := getGetWorkflowExecutionHistoryRequest(filterType)
 	getResponse := &shared.GetWorkflowExecutionHistoryResponse{
 		History: &shared.History{
@@ -331,7 +331,7 @@ func (s *workflowRunSuite) TestExecuteWorkflow_NoDup_Failed() {
 	s.Equal(workflowRun.GetRunID(), runID)
 	decodedResult := time.Minute
 	err = workflowRun.Get(context.Background(), &decodedResult)
-	s.Equal(constructError(reason, encodedDetails), err)
+	s.Equal(constructError(reason, encodedDetails, dataConverter), err)
 	s.Equal(time.Minute, decodedResult)
 }
 
@@ -447,7 +447,7 @@ func (s *workflowRunSuite) TestExecuteWorkflow_NoDup_ContinueAsNew() {
 	s.workflowServiceClient.EXPECT().GetWorkflowExecutionHistory(gomock.Any(), getRequest1, gomock.Any(), gomock.Any(), gomock.Any()).Return(getResponse1, nil).Times(1)
 
 	workflowResult := time.Hour * 59
-	encodedResult, _ := getHostEnvironment().encodeArg(workflowResult)
+	encodedResult, _ := encodeArg(newDefaultDataConverter(), workflowResult)
 	eventType2 := shared.EventTypeWorkflowExecutionCompleted
 	getRequest2 := getGetWorkflowExecutionHistoryRequest(filterType)
 	getRequest2.Execution.RunId = common.StringPtr(newRunID)
@@ -579,6 +579,65 @@ func (s *workflowClientTestSuite) TestSignalWithStartWorkflow_Error() {
 	s.service.EXPECT().SignalWithStartWorkflowExecution(gomock.Any(), gomock.Any(), gomock.Any()).Return(createResponse, nil)
 	resp, err = s.client.SignalWithStartWorkflow(context.Background(), workflowID, signalName, signalInput,
 		options, workflowType)
+	s.Nil(err)
+	s.Equal(createResponse.GetRunId(), resp.RunID)
+}
+
+func (s *workflowClientTestSuite) TestStartWorkflow() {
+	client, ok := s.client.(*workflowClient)
+	s.True(ok)
+	options := StartWorkflowOptions{
+		ID:                              workflowID,
+		TaskList:                        tasklist,
+		ExecutionStartToCloseTimeout:    timeoutInSeconds,
+		DecisionTaskStartToCloseTimeout: timeoutInSeconds,
+	}
+	f1 := func(ctx Context, r []byte) string {
+		return "result"
+	}
+
+	createResponse := &shared.StartWorkflowExecutionResponse{
+		RunId: common.StringPtr(runID),
+	}
+	s.service.EXPECT().StartWorkflowExecution(gomock.Any(), gomock.Any(), gomock.Any()).Return(createResponse, nil)
+
+	resp, err := client.StartWorkflow(context.Background(), options, f1, []byte("test"))
+	s.Equal(newDefaultDataConverter(), client.dataConverter)
+	s.Nil(err)
+	s.Equal(createResponse.GetRunId(), resp.RunID)
+}
+
+func (s *workflowClientTestSuite) TestStartWorkflow_WithDataConverter() {
+	dc := newTestDataConverter()
+	s.client = NewClient(s.service, domain, &ClientOptions{DataConverter: dc})
+	client, ok := s.client.(*workflowClient)
+	s.True(ok)
+	options := StartWorkflowOptions{
+		ID:                              workflowID,
+		TaskList:                        tasklist,
+		ExecutionStartToCloseTimeout:    timeoutInSeconds,
+		DecisionTaskStartToCloseTimeout: timeoutInSeconds,
+	}
+	f1 := func(ctx Context, r []byte) string {
+		return "result"
+	}
+	input := []byte("test")
+
+	createResponse := &shared.StartWorkflowExecutionResponse{
+		RunId: common.StringPtr(runID),
+	}
+	s.service.EXPECT().StartWorkflowExecution(gomock.Any(), gomock.Any(), gomock.Any()).Return(createResponse, nil).
+		Do(func(_ interface{}, req *shared.StartWorkflowExecutionRequest, _ ...interface{}) {
+			dc := client.dataConverter
+			encodedArg, _ := dc.ToData(input)
+			s.Equal(req.Input, encodedArg)
+			var decodedArg []byte
+			dc.FromData(req.Input, &decodedArg)
+			s.Equal(input, decodedArg)
+		})
+
+	resp, err := client.StartWorkflow(context.Background(), options, f1, input)
+	s.Equal(newTestDataConverter(), client.dataConverter)
 	s.Nil(err)
 	s.Equal(createResponse.GetRunId(), resp.RunID)
 }

@@ -241,8 +241,9 @@ type (
 
 	// ClientOptions are optional parameters for Client creation.
 	ClientOptions struct {
-		MetricsScope tally.Scope
-		Identity     string
+		MetricsScope  tally.Scope
+		Identity      string
+		DataConverter encoded.DataConverter
 	}
 
 	// StartWorkflowOptions configuration parameters for starting a workflow execution.
@@ -335,11 +336,16 @@ func NewClient(service workflowserviceclient.Interface, domain string, options *
 		metricScope = options.MetricsScope
 	}
 	metricScope = tagScope(metricScope, tagDomain, domain)
+	dataConverter := newDefaultDataConverter()
+	if options != nil && options.DataConverter != nil {
+		dataConverter = options.DataConverter
+	}
 	return &workflowClient{
 		workflowService: metrics.NewWorkflowServiceWrapper(service, metricScope),
 		domain:          domain,
 		metricsScope:    metrics.NewTaggedScope(metricScope),
 		identity:        identity,
+		dataConverter:   dataConverter,
 	}
 }
 
@@ -385,8 +391,7 @@ func (p WorkflowIDReusePolicy) toThriftPtr() *s.WorkflowIdReusePolicy {
 //   var result string // This need to be same type as the one passed to RecordHeartbeat
 //   NewValue(data).Get(&result)
 func NewValue(data []byte) encoded.Value {
-	result := EncodedValue(data)
-	return &result
+	return newEncodedValue(data, nil)
 }
 
 // NewValues creates a new encoded.Values which can be used to decode binary data returned by Cadence. For example:
@@ -397,6 +402,5 @@ func NewValue(data []byte) encoded.Value {
 //   var result2 int // These need to be same type as those arguments passed to RecordHeartbeat
 //   NewValues(data).Get(&result1, &result2)
 func NewValues(data []byte) encoded.Values {
-	result := EncodedValues(data)
-	return &result
+	return newEncodedValues(data, nil)
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/uber-go/tally"
 	"go.uber.org/cadence/.gen/go/cadence/workflowserviceclient"
 	s "go.uber.org/cadence/.gen/go/shared"
+	"go.uber.org/cadence/encoded"
 	"go.uber.org/cadence/internal/common"
 	"go.uber.org/cadence/internal/common/backoff"
 	"go.uber.org/cadence/internal/common/metrics"
@@ -109,9 +110,10 @@ type (
 	}
 
 	localActivityTaskHandler struct {
-		userContext  context.Context
-		metricsScope tally.Scope
-		logger       *zap.Logger
+		userContext   context.Context
+		metricsScope  tally.Scope
+		logger        *zap.Logger
+		dataConverter encoded.DataConverter
 	}
 
 	localActivityResult struct {
@@ -317,9 +319,10 @@ func (wtp *workflowTaskPoller) RespondTaskCompleted(completedRequest interface{}
 
 func newLocalActivityPoller(params workerExecutionParameters, laTunnel *localActivityTunnel) *localActivityTaskPoller {
 	handler := &localActivityTaskHandler{
-		userContext:  params.UserContext,
-		metricsScope: params.MetricsScope,
-		logger:       params.Logger,
+		userContext:   params.UserContext,
+		metricsScope:  params.MetricsScope,
+		logger:        params.Logger,
+		dataConverter: params.DataConverter,
 	}
 	return &localActivityTaskPoller{
 		handler:      handler,
@@ -356,6 +359,7 @@ func (lath *localActivityTaskHandler) executeLocalActivityTask(task *localActivi
 		logger:            lath.logger,
 		metricsScope:      lath.metricsScope,
 		isLocalActivity:   true,
+		dataConverter:     lath.dataConverter,
 	})
 
 	// panic handler
@@ -806,7 +810,8 @@ func reportActivityCompleteByID(ctx context.Context, service workflowserviceclie
 	return reportErr
 }
 
-func convertActivityResultToRespondRequest(identity string, taskToken, result []byte, err error) interface{} {
+func convertActivityResultToRespondRequest(identity string, taskToken, result []byte, err error,
+	dataConverter encoded.DataConverter) interface{} {
 	if err == ErrActivityResultPending {
 		// activity result is pending and will be completed asynchronously.
 		// nothing to report at this point
@@ -820,7 +825,7 @@ func convertActivityResultToRespondRequest(identity string, taskToken, result []
 			Identity:  common.StringPtr(identity)}
 	}
 
-	reason, details := getErrorDetails(err)
+	reason, details := getErrorDetails(err, dataConverter)
 	if _, ok := err.(*CanceledError); ok || err == context.Canceled {
 		return &s.RespondActivityTaskCanceledRequest{
 			TaskToken: taskToken,
@@ -836,7 +841,7 @@ func convertActivityResultToRespondRequest(identity string, taskToken, result []
 }
 
 func convertActivityResultToRespondRequestByID(identity, domain, workflowID, runID, activityID string,
-	result []byte, err error) interface{} {
+	result []byte, err error, dataConverter encoded.DataConverter) interface{} {
 	if err == ErrActivityResultPending {
 		// activity result is pending and will be completed asynchronously.
 		// nothing to report at this point
@@ -853,7 +858,7 @@ func convertActivityResultToRespondRequestByID(identity, domain, workflowID, run
 			Identity:   common.StringPtr(identity)}
 	}
 
-	reason, details := getErrorDetails(err)
+	reason, details := getErrorDetails(err, dataConverter)
 	if _, ok := err.(*CanceledError); ok || err == context.Canceled {
 		return &s.RespondActivityTaskCanceledByIDRequest{
 			Domain:     common.StringPtr(domain),

@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"go.uber.org/cadence/.gen/go/shared"
+	"go.uber.org/cadence/encoded"
 )
 
 /*
@@ -87,7 +88,7 @@ type (
 	// CustomError returned from workflow and activity implementations with reason and optional details.
 	CustomError struct {
 		reason  string
-		details EncodedValues
+		details encoded.Values
 	}
 
 	// GenericError returned from workflow/workflow when the implementations return errors other than from NewCustomError() API.
@@ -98,12 +99,12 @@ type (
 	// TimeoutError returned when activity or child workflow timed out.
 	TimeoutError struct {
 		timeoutType shared.TimeoutType
-		details     EncodedValues
+		details     encoded.Values
 	}
 
 	// CanceledError returned when operation was canceled.
 	CanceledError struct {
-		details EncodedValues
+		details encoded.Values
 	}
 
 	// TerminatedError returned when workflow was terminated.
@@ -146,12 +147,14 @@ func NewCustomError(reason string, details ...interface{}) *CustomError {
 	if strings.HasPrefix(reason, "cadenceInternal:") {
 		panic("'cadenceInternal:' is reserved prefix, please use different reason")
 	}
-
-	data, err := getHostEnvironment().encodeArgs(details)
-	if err != nil {
-		panic(err)
+	// When return error to user, use EncodedValues as details and data is ready to be decoded by calling Get
+	if len(details) == 1 {
+		if d, ok := details[0].(*EncodedValues); ok {
+			return &CustomError{reason: reason, details: d}
+		}
 	}
-	return &CustomError{reason: reason, details: data}
+	// When create error for server, use ErrorDetailsValues as details to hold values and encode later
+	return &CustomError{reason: reason, details: ErrorDetailsValues(details)}
 }
 
 // NewTimeoutError creates TimeoutError instance.
@@ -162,20 +165,22 @@ func NewTimeoutError(timeoutType shared.TimeoutType) *TimeoutError {
 
 // NewHeartbeatTimeoutError creates TimeoutError instance
 func NewHeartbeatTimeoutError(details ...interface{}) *TimeoutError {
-	data, err := getHostEnvironment().encodeArgs(details)
-	if err != nil {
-		panic(err)
+	if len(details) == 1 {
+		if d, ok := details[0].(*EncodedValues); ok {
+			return &TimeoutError{timeoutType: shared.TimeoutTypeHeartbeat, details: d}
+		}
 	}
-	return &TimeoutError{timeoutType: shared.TimeoutTypeHeartbeat, details: data}
+	return &TimeoutError{timeoutType: shared.TimeoutTypeHeartbeat, details: ErrorDetailsValues(details)}
 }
 
 // NewCanceledError creates CanceledError instance
 func NewCanceledError(details ...interface{}) *CanceledError {
-	data, err := getHostEnvironment().encodeArgs(details)
-	if err != nil {
-		panic(err)
+	if len(details) == 1 {
+		if d, ok := details[0].(*EncodedValues); ok {
+			return &CanceledError{details: d}
+		}
 	}
-	return &CanceledError{details: data}
+	return &CanceledError{details: ErrorDetailsValues(details)}
 }
 
 // NewContinueAsNewError creates ContinueAsNewError instance
@@ -192,13 +197,13 @@ func NewCanceledError(details ...interface{}) *CanceledError {
 //
 func NewContinueAsNewError(ctx Context, wfn interface{}, args ...interface{}) *ContinueAsNewError {
 	// Validate type and its arguments.
-	workflowType, input, err := getValidatedWorkflowFunction(wfn, args)
-	if err != nil {
-		panic(err)
-	}
 	options := getWorkflowEnvOptions(ctx)
 	if options == nil {
 		panic("context is missing required options for continue as new")
+	}
+	workflowType, input, err := getValidatedWorkflowFunction(wfn, args, options.dataConverter)
+	if err != nil {
+		panic(err)
 	}
 	if options.taskListName == nil || *options.taskListName == "" {
 		panic("invalid task list provided")
@@ -227,11 +232,14 @@ func (e *CustomError) Reason() string {
 
 // HasDetails return if this error has strong typed detail data.
 func (e *CustomError) HasDetails() bool {
-	return e.details.HasValues()
+	return e.details != nil && e.details.HasValues()
 }
 
 // Details extracts strong typed detail data of this custom error. If there is no details, it will return ErrNoData.
 func (e *CustomError) Details(d ...interface{}) error {
+	if !e.HasDetails() {
+		return ErrNoData
+	}
 	return e.details.Get(d...)
 }
 
@@ -252,11 +260,14 @@ func (e *TimeoutError) TimeoutType() shared.TimeoutType {
 
 // HasDetails return if this error has strong typed detail data.
 func (e *TimeoutError) HasDetails() bool {
-	return e.details.HasValues()
+	return e.details != nil && e.details.HasValues()
 }
 
 // Details extracts strong typed detail data of this error. If there is no details, it will return ErrNoData.
 func (e *TimeoutError) Details(d ...interface{}) error {
+	if !e.HasDetails() {
+		return ErrNoData
+	}
 	return e.details.Get(d...)
 }
 
@@ -267,11 +278,14 @@ func (e *CanceledError) Error() string {
 
 // HasDetails return if this error has strong typed detail data.
 func (e *CanceledError) HasDetails() bool {
-	return e.details.HasValues()
+	return e.details != nil && e.details.HasValues()
 }
 
 // Details extracts strong typed detail data of this error.
 func (e *CanceledError) Details(d ...interface{}) error {
+	if !e.HasDetails() {
+		return ErrNoData
+	}
 	return e.details.Get(d...)
 }
 

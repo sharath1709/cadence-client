@@ -101,6 +101,13 @@ func createTestEventActivityTaskCompleted(eventID int64, attr *s.ActivityTaskCom
 		ActivityTaskCompletedEventAttributes: attr}
 }
 
+func createTestEventActivityTaskTimedOut(eventID int64, attr *s.ActivityTaskTimedOutEventAttributes) *s.HistoryEvent {
+	return &s.HistoryEvent{
+		EventId:                             common.Int64Ptr(eventID),
+		EventType:                           common.EventTypePtr(s.EventTypeActivityTaskTimedOut),
+		ActivityTaskTimedOutEventAttributes: attr}
+}
+
 func createTestEventDecisionTaskScheduled(eventID int64, attr *s.DecisionTaskScheduledEventAttributes) *s.HistoryEvent {
 	return &s.HistoryEvent{
 		EventId:   common.Int64Ptr(eventID),
@@ -161,17 +168,13 @@ func createQueryTask(
 	return task
 }
 
-func (t *TaskHandlersTestSuite) TestWorkflowTask_WorkflowExecutionStarted() {
-	taskList := "tl1"
+var testWorkflowTaskTasklist = "tl1"
+
+func (t *TaskHandlersTestSuite) testWorkflowTaskWorkflowExecutionStartedHelper(params workerExecutionParameters) {
 	testEvents := []*s.HistoryEvent{
-		createTestEventWorkflowExecutionStarted(1, &s.WorkflowExecutionStartedEventAttributes{TaskList: &s.TaskList{Name: &taskList}}),
+		createTestEventWorkflowExecutionStarted(1, &s.WorkflowExecutionStartedEventAttributes{TaskList: &s.TaskList{Name: &testWorkflowTaskTasklist}}),
 	}
 	task := createWorkflowTask(testEvents, 0, "HelloWorld_Workflow")
-	params := workerExecutionParameters{
-		TaskList: taskList,
-		Identity: "test-id-1",
-		Logger:   t.logger,
-	}
 	taskHandler := newWorkflowTaskHandler(testDomain, params, nil, getHostEnvironment())
 	request, _, err := taskHandler.ProcessWorkflowTask(task, nil, false)
 	response := request.(*s.RespondDecisionTaskCompletedRequest)
@@ -180,6 +183,25 @@ func (t *TaskHandlersTestSuite) TestWorkflowTask_WorkflowExecutionStarted() {
 	t.Equal(1, len(response.Decisions))
 	t.Equal(s.DecisionTypeScheduleActivityTask, response.Decisions[0].GetDecisionType())
 	t.NotNil(response.Decisions[0].ScheduleActivityTaskDecisionAttributes)
+}
+
+func (t *TaskHandlersTestSuite) TestWorkflowTask_WorkflowExecutionStarted() {
+	params := workerExecutionParameters{
+		TaskList: testWorkflowTaskTasklist,
+		Identity: "test-id-1",
+		Logger:   t.logger,
+	}
+	t.testWorkflowTaskWorkflowExecutionStartedHelper(params)
+}
+
+func (t *TaskHandlersTestSuite) TestWorkflowTask_WorkflowExecutionStarted_WithDataConverter() {
+	params := workerExecutionParameters{
+		TaskList:      testWorkflowTaskTasklist,
+		Identity:      "test-id-1",
+		Logger:        t.logger,
+		DataConverter: newTestDataConverter(),
+	}
+	t.testWorkflowTaskWorkflowExecutionStartedHelper(params)
 }
 
 func (t *TaskHandlersTestSuite) TestWorkflowTask_ActivityTaskScheduled() {
@@ -334,7 +356,7 @@ func (t *TaskHandlersTestSuite) verifyQueryResult(response interface{}, expected
 	t.True(ok)
 	t.Nil(queryResp.ErrorMessage)
 	t.NotNil(queryResp.QueryResult)
-	encodedValue := EncodedValue(queryResp.QueryResult)
+	encodedValue := newEncodedValue(queryResp.QueryResult, nil)
 	var queryResult string
 	err := encodedValue.Get(&queryResult)
 	t.NoError(err)
@@ -558,7 +580,8 @@ func (t *TaskHandlersTestSuite) TestActivityExecutionDeadline() {
 	for i, d := range deadlineTests {
 		a.d = d.actWaitDuration
 		wep := workerExecutionParameters{
-			Logger: t.logger,
+			Logger:        t.logger,
+			DataConverter: newDefaultDataConverter(),
 		}
 		activityHandler := newActivityTaskHandler(mockService, wep, hostEnv)
 		pats := &s.PollForActivityTaskResponse{
