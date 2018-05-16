@@ -251,3 +251,22 @@ func Test_CanceledError(t *testing.T) {
 	require.Equal(t, testErrorDetails2, b2)
 	require.Equal(t, testErrorDetails3, b3)
 }
+
+func TestErrorDetailsValues(t *testing.T) {
+	e := ErrorDetailsValues{}
+	require.Equal(t, ErrNoData, e.Get())
+
+	e = ErrorDetailsValues{testErrorDetails1, testErrorDetails2, testErrorDetails3}
+	var a1 string
+	var a2 int
+	var a3 testStruct
+	require.True(t, e.HasValues())
+	e.Get(&a1)
+	require.Equal(t, testErrorDetails1, a1)
+	e.Get(&a1, &a2, &a3)
+	require.Equal(t, testErrorDetails1, a1)
+	require.Equal(t, testErrorDetails2, a2)
+	require.Equal(t, testErrorDetails3, a3)
+
+	require.Equal(t, ErrTooManyArg, e.Get(&a1, &a2, &a3, &a3))
+}

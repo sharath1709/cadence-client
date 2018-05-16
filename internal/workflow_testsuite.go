@@ -96,8 +96,11 @@ func (b ErrorDetailsValues) Get(valuePtr ...interface{}) error {
 	if !b.HasValues() {
 		return ErrNoData
 	}
-	for i, item := range b {
-		reflect.ValueOf(valuePtr[i]).Elem().Set(reflect.ValueOf(item))
+	if len(valuePtr) > len(b) {
+		return ErrTooManyArg
+	}
+	for i, item := range valuePtr {
+		reflect.ValueOf(item).Elem().Set(reflect.ValueOf(b[i]))
 	}
 	return nil
 }
